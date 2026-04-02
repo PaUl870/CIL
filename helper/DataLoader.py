@@ -12,27 +12,29 @@ class DataLoader:
         self.train_df = None
         self.valid_df = None
         self.test_df = None
+        self.wishlist_df = None
         
         # Dimensions for embeddings
         self.num_users = 0
         self.num_items = 0
 
     def load_and_split(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Loads train_ratings.csv and performs the coverage-safe split."""
-        path = os.path.join(self.data_dir, "train_ratings.csv")
-        df = pd.read_csv(path).astype({"sid": int, "pid": int})
-        df = df.reset_index(drop=True)
+        """Loads train_ratings.csv and wishlist data, performs the coverage-safe split."""
+        # --- 1. Load Ratings ---
+        path_ratings = os.path.join(self.data_dir, "train_ratings.csv")
+        df_ratings = pd.read_csv(path_ratings).astype({"sid": int, "pid": int})
+        df_ratings = df_ratings.reset_index(drop=True)
 
-        # 1. Ensure coverage: one row per unique sid and pid
-        sid_idx = df.groupby("sid").head(1).index
-        pid_idx = df.groupby("pid").head(1).index
+        # Ensure coverage: one row per unique sid and pid
+        sid_idx = df_ratings.groupby("sid").head(1).index
+        pid_idx = df_ratings.groupby("pid").head(1).index
         core_idx = sid_idx.union(pid_idx)
 
-        core_train = df.loc[core_idx]
-        remaining = df.drop(index=core_idx)
+        core_train = df_ratings.loc[core_idx]
+        remaining = df_ratings.drop(index=core_idx)
 
-        # 2. Perform 75/25 split on the remaining data
-        target = int(np.ceil(0.75 * len(df)))
+        # Perform 75/25 split on the remaining data
+        target = int(np.ceil(0.75 * len(df_ratings)))
         add_n = min(max(0, target - len(core_train)), len(remaining))
 
         if add_n > 0:
@@ -45,9 +47,23 @@ class DataLoader:
             self.train_df = core_train.reset_index(drop=True)
             self.valid_df = remaining.reset_index(drop=True)
 
-        # Update dimensions based on the full dataset
-        self.num_users = df["sid"].max() + 1
-        self.num_items = df["pid"].max() + 1
+        # --- 2. Load Wishlist ---
+        path_wishlist = os.path.join(self.data_dir, "train_tbr.csv")
+        if os.path.exists(path_wishlist):
+            self.wishlist_df = pd.read_csv(path_wishlist).astype({"sid": int, "pid": int})
+        else:
+            print(f"Warning: Wishlist file not found at {path_wishlist}. Proceeding with empty wishlist.")
+            self.wishlist_df = pd.DataFrame(columns=["sid", "pid"])
+
+        # --- 3. Update Dimensions across both datasets ---
+        max_sid_ratings = df_ratings["sid"].max()
+        max_pid_ratings = df_ratings["pid"].max()
+        
+        max_sid_wish = self.wishlist_df["sid"].max() if not self.wishlist_df.empty else 0
+        max_pid_wish = self.wishlist_df["pid"].max() if not self.wishlist_df.empty else 0
+
+        self.num_users = max(max_sid_ratings, max_sid_wish) + 1
+        self.num_items = max(max_pid_ratings, max_pid_wish) + 1
         
         return self.train_df, self.valid_df
 
@@ -63,15 +79,28 @@ class DataLoader:
         return self.test_df
 
     def get_graph_tensors(self, device='cpu'):
-        """Converts train_df into edge_index and weights for GCN models."""
+        """Converts train_df and wishlist_df into edge_index and weights for GCN models."""
         if self.train_df is None:
             raise ValueError("Data not loaded. Run load_and_split() first.")
             
-        edge_index = torch.tensor(self.train_df[["sid", "pid"]].values.T, dtype=torch.long)
+        # Type 0: Ratings
+        edge_index_t0 = torch.tensor(self.train_df[["sid", "pid"]].values.T, dtype=torch.long)
         # Normalize ratings to [0, 1] for propagation
-        edge_weights = torch.tensor(self.train_df["rating"].values / 5.0, dtype=torch.float)
+        weights_t0 = torch.tensor(self.train_df["rating"].values / 5.0, dtype=torch.float)
         
-        return edge_index.to(device), edge_weights.to(device)
+        # Type 1: Wishlist
+        if self.wishlist_df is not None and not self.wishlist_df.empty:
+            edge_index_t1 = torch.tensor(self.wishlist_df[["sid", "pid"]].values.T, dtype=torch.long)
+            # Implicit feedback: assign a uniform weight of 1.0 to all wishlist edges
+            weights_t1 = torch.ones(edge_index_t1.shape[1], dtype=torch.float)
+        else:
+            edge_index_t1 = torch.empty((2, 0), dtype=torch.long)
+            weights_t1 = torch.empty((0,), dtype=torch.float)
+            
+        return (
+            edge_index_t0.to(device), weights_t0.to(device),
+            edge_index_t1.to(device), weights_t1.to(device)
+        )
 
     def make_submission(self, pred_fn: Callable, output_path: str):
         """Standardized submission generator."""
