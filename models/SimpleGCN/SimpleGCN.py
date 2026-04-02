@@ -14,7 +14,7 @@ class SimpleGCN(nn.Module):
         self.item_embedding = nn.Embedding(num_items, embedding_dim)
         
         # Create a list of modular layers
-        self.layers = nn.ModuleList([GCNLayer.LightGCNLayer() for _ in range(num_layers)])
+        self.layers = nn.ModuleList([GCNLayer.LightGCNLayer(dropout=self.dropout) for _ in range(num_layers)])
         
         # Initialization
         nn.init.normal_(self.user_embedding.weight, std=0.01)
