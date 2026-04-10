@@ -55,8 +55,8 @@ class GCNLayer(nn.Module):
         # ------------------------------------------------------------------ #
         # 2. Symmetric normalization  D^{-1/2} A D^{-1/2}
         # ------------------------------------------------------------------ #
-        user_deg = torch.bincount(user_idx, minlength=num_users).float().clamp(min=1)
-        item_deg = torch.bincount(item_idx, minlength=num_items).float().clamp(min=1)
+        user_deg = torch.zeros(num_users, device=weights.device).scatter_add_(0, user_idx, weights)
+        item_deg = torch.zeros(num_items, device=weights.device).scatter_add_(0, item_idx, weights)
 
         norm = 1.0 / (user_deg[user_idx].sqrt() * item_deg[item_idx].sqrt())
         edge_weights = (weights * norm).unsqueeze(1)  # [num_edges, 1]
@@ -118,8 +118,8 @@ class LightGCNLayer(nn.Module):
         user_idx, item_idx = edge_index[0], edge_index[1]
         num_users, num_items = u_emb.size(0), i_emb.size(0)
 
-        user_deg = torch.bincount(user_idx, minlength=num_users).float().clamp(min=1)
-        item_deg = torch.bincount(item_idx, minlength=num_items).float().clamp(min=1)
+        user_deg = torch.zeros(num_users, device=weights.device).scatter_add_(0, user_idx, weights)
+        item_deg = torch.zeros(num_items, device=weights.device).scatter_add_(0, item_idx, weights)
 
         norm = 1.0 / (user_deg[user_idx].sqrt() * item_deg[item_idx].sqrt())
         edge_weights = (weights * norm).unsqueeze(1)
