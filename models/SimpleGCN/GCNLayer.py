@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+
 class GCNLayer(nn.Module):
     def __init__(self, emb_dim: int, dropout: float = 0.1):
         """
@@ -130,4 +131,65 @@ class LightGCNLayer(nn.Module):
         new_i_emb = torch.zeros_like(i_emb)
         new_i_emb.index_add_(0, item_idx, u_emb[user_idx] * edge_weights)
 
+        return new_u_emb, new_i_emb
+    
+
+
+class LightGATLayer(nn.Module):
+    """
+    Lightweight GAT layer for bipartite user-item graphs.
+    Single relation (e.g. ratings only).
+    """
+    def __init__(self, dim: int, dropout: float = 0.1):
+        super().__init__()
+        self.dropout = dropout
+        self.attn_projector = nn.Linear(dim * 2, 1, bias=False)
+        self.leaky_relu = nn.LeakyReLU(0.2)
+ 
+    def _weighted_dropout(self, edge_index, weights):
+        if self.training and self.dropout > 0:
+            drop_prob = self.dropout * (1.0 - weights)
+            mask = torch.rand(weights.size(0), device=weights.device) > drop_prob
+            return edge_index[:, mask], weights[mask]
+        return edge_index, weights
+ 
+    def _scatter_softmax(self, scores, idx, num_nodes):
+        score_max = torch.full((num_nodes,), float('-inf'), device=scores.device)
+        score_max.index_reduce_(0, idx, scores, reduce='amax', include_self=True)
+        exp_scores = torch.exp(scores - score_max[idx])
+        exp_sum = torch.zeros(num_nodes, device=scores.device)
+        exp_sum.index_add_(0, idx, exp_scores)
+        return exp_scores / (exp_sum[idx] + 1e-10)
+ 
+    def forward(self, u_emb, i_emb, edge_index, weights):
+        """
+        Args:
+            u_emb:      [num_users, dim]
+            i_emb:      [num_items, dim]
+            edge_index: [2, E]
+            weights:    [E]  in [0.2, 1.0]
+        Returns:
+            new_u_emb: [num_users, dim]
+            new_i_emb: [num_items, dim]
+        """
+        num_users, num_items = u_emb.size(0), i_emb.size(0)
+ 
+        edge_index, weights = self._weighted_dropout(edge_index, weights)
+        user_idx, item_idx = edge_index[0], edge_index[1]
+ 
+        # 1. Attention scores scaled by edge weight
+        edge_feat = torch.cat([u_emb[user_idx], i_emb[item_idx]], dim=-1)
+        raw_scores = self.leaky_relu(self.attn_projector(edge_feat).squeeze(-1)) 
+ 
+        # 2. Scatter softmax per node neighbourhood
+        u_attn = self._scatter_softmax(raw_scores, user_idx, num_users)
+        i_attn = self._scatter_softmax(raw_scores, item_idx, num_items)
+ 
+        # 3. Symmetric aggregation + self-connection
+        new_u_emb = u_emb.clone()
+        new_u_emb.index_add_(0, user_idx, i_emb[item_idx] * u_attn.unsqueeze(-1))
+ 
+        new_i_emb = i_emb.clone()
+        new_i_emb.index_add_(0, item_idx, u_emb[user_idx] * i_attn.unsqueeze(-1))
+ 
         return new_u_emb, new_i_emb
