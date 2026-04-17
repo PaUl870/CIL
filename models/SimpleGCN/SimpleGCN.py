@@ -3,13 +3,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F 
 from models.SimpleGCN import GCNLayer
+import numpy as np
 import math
 
 class SimpleGCN(nn.Module):
-    def __init__(self, num_users, num_items, embedding_dim, num_layers=3, layer_type="LightGAT", dropout=0.1):
+    def __init__(self, num_users, num_items, embedding_dim, num_layers=3, layer_type="LightGCN", dropout=0.1, max_degree=20, sample_strategy="extreme", extreme_alpha=2.0):
         super(SimpleGCN, self).__init__()
         self.num_layers = num_layers
         self.dropout = dropout
+
+        self.max_degree      = max_degree       
+        self.sample_strategy = sample_strategy
+        self.extreme_alpha   = extreme_alpha
         self.embedding_dim = embedding_dim
 
         self.project = nn.Linear(embedding_dim, embedding_dim)
@@ -34,6 +39,15 @@ class SimpleGCN(nn.Module):
         
 
     def forward(self, user_indices, item_indices, edge_index, weights):
+        # sub-sample neighbors during training
+        if self.training and self.max_degree is not None:
+            edge_index, weights = self._subsample_neighbors(
+                edge_index, weights,
+                max_degree=self.max_degree,
+                strategy=self.sample_strategy,
+                extreme_alpha=self.extreme_alpha,
+            )
+
         u_emb = self.user_embedding.weight
         i_emb = self.item_embedding.weight
         
@@ -77,6 +91,96 @@ class SimpleGCN(nn.Module):
         
         # Predict rating via dot product
         return prediction, u_init, i_init
+    
+    @staticmethod
+    def _subsample_neighbors(
+        edge_index: torch.Tensor,   # (2, E)  [user_ids ; item_ids]
+        weights: torch.Tensor,      # (E,)
+        max_degree: int,
+        strategy: str = "uniform",  # "uniform" | "extreme"
+        extreme_alpha: float = 2.0,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Caps each user's out-degree to max_degree edges.
+        Operates on CPU via numpy for fast indexing, returns tensors on the original device.
+        Only called during training.
+        """
+        device = edge_index.device
+        users = edge_index[0].cpu().numpy()
+        items = edge_index[1].cpu().numpy()
+        w     = weights.cpu().numpy()
+
+        keep = []
+        for uid in np.unique(users):
+            mask = np.where(users == uid)[0]
+            if len(mask) <= max_degree:
+                keep.append(mask)
+                continue
+
+            if strategy == "uniform":
+                chosen = np.random.choice(mask, size=max_degree, replace=False)
+
+            elif strategy == "extreme":
+                ratings = w[mask]                          # already normalised to [0,1]
+                user_mean = ratings.mean()
+                dist = np.abs(ratings - user_mean) ** extreme_alpha
+                eps  = 1e-3 * dist.max() if dist.max() > 0 else 1e-6
+                probs = (dist + eps)
+                probs /= probs.sum()
+                chosen = np.random.choice(mask, size=max_degree, replace=False, p=probs)
+
+            keep.append(chosen)
+
+        idx = np.concatenate(keep)
+        return (
+            edge_index[:, idx].to(device),
+            weights[idx].to(device),
+        )
+    
+    @staticmethod
+    def _subsample_neighbors(
+        edge_index: torch.Tensor,   # (2, E)  [user_ids ; item_ids]
+        weights: torch.Tensor,      # (E,)
+        max_degree: int,
+        strategy: str = "uniform",  # "uniform" | "extreme"
+        extreme_alpha: float = 2.0,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Caps each user's out-degree to max_degree edges.
+        Operates on CPU via numpy for fast indexing, returns tensors on the original device.
+        Only called during training.
+        """
+        device = edge_index.device
+        users = edge_index[0].cpu().numpy()
+        items = edge_index[1].cpu().numpy()
+        w     = weights.cpu().numpy()
+
+        keep = []
+        for uid in np.unique(users):
+            mask = np.where(users == uid)[0]
+            if len(mask) <= max_degree:
+                keep.append(mask)
+                continue
+
+            if strategy == "uniform":
+                chosen = np.random.choice(mask, size=max_degree, replace=False)
+
+            elif strategy == "extreme":
+                ratings = w[mask]                          # already normalised to [0,1]
+                user_mean = ratings.mean()
+                dist = np.abs(ratings - user_mean) ** extreme_alpha
+                eps  = 1e-3 * dist.max() if dist.max() > 0 else 1e-6
+                probs = (dist + eps)
+                probs /= probs.sum()
+                chosen = np.random.choice(mask, size=max_degree, replace=False, p=probs)
+
+            keep.append(chosen)
+
+        idx = np.concatenate(keep)
+        return (
+            edge_index[:, idx].to(device),
+            weights[idx].to(device),
+        )
     
     def predict_ratings(self, sids, pids, edge_index, weights):
             """
