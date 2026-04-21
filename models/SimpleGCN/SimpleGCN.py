@@ -5,6 +5,30 @@ from models.SimpleGCN import GCNLayer
 import math
 
 
+class PredictionMLP(nn.Module):
+    """Optional MLP head that replaces the dot-product scorer."""
+
+    def __init__(self, emb_dim: int, hidden_dims: list[int] = (256, 64)):
+        super().__init__()
+        in_dim = emb_dim * 2          # concat(u, i)
+        dims = [in_dim, *hidden_dims]
+        layers = []
+        for d_in, d_out in zip(dims[:-1], dims[1:]):
+            layers += [nn.Linear(d_in, d_out), nn.ReLU()]
+        layers.append(nn.Linear(dims[-1], 1))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, u: torch.Tensor, i: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            u: [B, dim]
+            i: [B, dim]
+        Returns:
+            [B] scores in (0, 1)
+        """
+        return torch.sigmoid(self.net(torch.cat([u, i], dim=-1)).squeeze(-1))
+
+
 class SimpleGCN(nn.Module):
     def __init__(
         self,
@@ -14,6 +38,8 @@ class SimpleGCN(nn.Module):
         num_layers: int = 3,
         layer_type: str = "LightGCN",
         dropout: float = 0.1,
+        use_mlp_head: bool = False,             
+        mlp_hidden_dims: list[int] = (256, 64), 
     ):
         super().__init__()
         self.num_layers = num_layers
@@ -43,11 +69,23 @@ class SimpleGCN(nn.Module):
         else:
             raise ValueError(f"Unsupported layer type: {layer_type}")
 
+        # Prediction head
+        self.mlp_head = (
+            PredictionMLP(embedding_dim, list(mlp_hidden_dims))
+            if use_mlp_head
+            else None
+        )
+
         nn.init.normal_(self.user_embedding.weight, std=0.01)
         nn.init.normal_(self.item_embedding.weight, std=0.01)
 
+    def _score(self, u: torch.Tensor, i: torch.Tensor) -> torch.Tensor:
+        """Unified scoring: MLP head or scaled dot product."""
+        if self.mlp_head is not None:
+            return self.mlp_head(u, i)
+        return torch.sigmoid((u * i).sum(dim=-1) / math.sqrt(self.embedding_dim))
+
     def forward(self, user_indices, item_indices, edge_index, weights):
-        # Build rating-specific subgraphs
         subgraphs = [
             {"edge_index": edge_index[:, weights == r]}
             for r in torch.unique(weights)
@@ -60,7 +98,6 @@ class SimpleGCN(nn.Module):
         all_i = [i_emb]
 
         for layer in self.layers:
-            # Collect messages from each rating-specific subgraph
             sub_msgs_u, sub_msgs_i = [], []
             for graph in subgraphs:
                 w_dummy = torch.ones(graph["edge_index"].size(1), device=edge_index.device)
@@ -68,7 +105,6 @@ class SimpleGCN(nn.Module):
                 sub_msgs_u.append(u_msg)
                 sub_msgs_i.append(i_msg)
 
-            # Attention-weighted combination of subgraph messages
             u_emb = self.attn_layer(u_emb, sub_msgs_u)
             i_emb = self.attn_layer(i_emb, sub_msgs_i)
 
@@ -78,7 +114,6 @@ class SimpleGCN(nn.Module):
             all_u.append(u_emb)
             all_i.append(i_emb)
 
-        # Mean-pool across layers (reduces over-smoothing)
         final_u = torch.stack(all_u, dim=1).mean(dim=1)
         final_i = torch.stack(all_i, dim=1).mean(dim=1)
 
@@ -88,9 +123,7 @@ class SimpleGCN(nn.Module):
         u_init = self.user_embedding.weight[user_indices]
         i_init = self.item_embedding.weight[item_indices]
 
-        prediction = torch.sigmoid(
-            (u_final * i_final).sum(dim=-1) / math.sqrt(self.embedding_dim)
-        )
+        prediction = self._score(u_final, i_final)  # ← uses MLP or dot product
         return prediction, u_init, i_init
 
     @torch.no_grad()
