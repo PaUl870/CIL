@@ -104,39 +104,29 @@ class LightGCNLayer(nn.Module):
     def __init__(self, dropout: float = 0.1):
         super(LightGCNLayer, self).__init__()
         self.dropout = dropout
-
-    def forward(
-        self,
-        u_emb: torch.Tensor,
-        i_emb: torch.Tensor,
-        edge_index: torch.Tensor,
-        weights: torch.Tensor,
-    ):
+    def forward(self, u_emb, i_emb, edge_index, weights):
         if self.training and self.dropout > 0:
             mask = torch.rand(weights.size(0), device=weights.device) > self.dropout
             edge_index = edge_index[:, mask]
-            weights = weights[mask]
-
-        if self.training and self.dropout > 0:
-            u_emb = F.dropout(u_emb, p=self.dropout)
-            i_emb = F.dropout(i_emb, p=self.dropout)
-
+            weights    = weights[mask]
+    
         user_idx, item_idx = edge_index[0], edge_index[1]
         num_users, num_items = u_emb.size(0), i_emb.size(0)
-
-        
-        user_deg = torch.zeros(num_users, device=weights.device).scatter_add_(0, user_idx, weights)
-        item_deg = torch.zeros(num_items, device=weights.device).scatter_add_(0, item_idx, weights)
-
-        norm = 1.0 / (user_deg[user_idx].sqrt() * item_deg[item_idx].sqrt())
-        edge_weights = (weights * norm).unsqueeze(1)
-
-        new_u_emb = torch.zeros_like(u_emb)
-        new_u_emb.index_add_(0, user_idx, i_emb[item_idx] * edge_weights)
-
-        new_i_emb = torch.zeros_like(i_emb)
-        new_i_emb.index_add_(0, item_idx, u_emb[user_idx] * edge_weights)
-
+    
+        # ✅ Count-based degree, as in He et al. 2020
+        ones = torch.ones(edge_index.size(1), device=weights.device)
+        user_deg = torch.zeros(num_users, device=weights.device).scatter_add_(0, user_idx, ones)
+        item_deg = torch.zeros(num_items, device=weights.device).scatter_add_(0, item_idx, ones)
+    
+        norm = (1.0 / (user_deg[user_idx].sqrt() * item_deg[item_idx].sqrt())).unsqueeze(1)
+    
+        k = u_emb.size(1)
+        new_u_emb = torch.zeros_like(u_emb).scatter_add(
+            0, user_idx.unsqueeze(1).expand(-1, k), i_emb[item_idx] * norm
+        )
+        new_i_emb = torch.zeros_like(i_emb).scatter_add(
+            0, item_idx.unsqueeze(1).expand(-1, k), u_emb[user_idx] * norm
+        )
         return new_u_emb, new_i_emb
     
 
@@ -199,3 +189,40 @@ class LightGATLayer(nn.Module):
         new_i_emb.index_add_(0, item_idx, u_emb[user_idx] * i_attn.unsqueeze(-1))
  
         return new_u_emb, new_i_emb
+
+
+
+
+class SAGELayer(nn.Module):
+    """
+    GraphSAGE Layer for Bipartite Graphs.
+    Performs: Linear(concat(self, aggregate)) + Activation.
+    """
+    def __init__(self, dim: int, dropout: float = 0.1):
+        super().__init__()
+        self.w_self = nn.Linear(dim, dim)
+        self.w_neigh = nn.Linear(dim, dim)
+        self.dropout = nn.Dropout(dropout)
+        self.act = nn.ReLU()
+
+    def forward(self, u_emb, i_emb, edge_index, edge_weight=None):
+        # edge_index is [2, E], where [0] is source and [1] is target
+        # For bipartite: 
+        # u_msg comes from items (edge_index[1]) to users (edge_index[0])
+        # i_msg comes from users (edge_index[0]) to items (edge_index[1])
+        
+        row, col = edge_index[0], edge_index[1]
+
+        # Aggregate neighbors (Mean Aggregator)
+        # Note: edge_weight can be used here if needed for importance
+        u_msg = torch.zeros_like(u_emb)
+        u_msg.index_add_(0, row, i_emb[col])
+        
+        i_msg = torch.zeros_like(i_emb)
+        i_msg.index_add_(0, col, u_emb[row])
+
+        # GraphSAGE Transformation: Linear(Self) + Linear(Neigh)
+        u_out = self.w_self(u_emb) + self.w_neigh(u_msg)
+        i_out = self.w_self(i_emb) + self.w_neigh(i_msg)
+
+        return self.act(u_out), self.act(i_out)

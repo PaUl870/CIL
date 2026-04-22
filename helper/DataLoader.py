@@ -86,7 +86,7 @@ class DataLoader:
         # Type 0: Ratings
         edge_index_t0 = torch.tensor(self.train_df[["sid", "pid"]].values.T, dtype=torch.long)
         # Normalize ratings to [0, 1] for propagation
-        weights_t0 = torch.tensor(self.train_df["rating"].values / 5.0, dtype=torch.float)
+        weights_t0 = torch.tensor(self.train_df["rating"].values, dtype=torch.float)
         
         # Type 1: Wishlist
         if self.wishlist_df is not None and not self.wishlist_df.empty:

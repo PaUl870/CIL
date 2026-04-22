@@ -86,7 +86,7 @@ class DataLoader:
         # Type 0: Ratings
         edge_index_t0 = torch.tensor(self.train_df[["sid", "pid"]].values.T, dtype=torch.long)
         # Normalize ratings to [0, 1] for propagation
-        weights_t0 = torch.tensor(self.train_df["rating"].values / 5.0, dtype=torch.float)
+        weights_t0 = torch.tensor(self.train_df["rating"].values, dtype=torch.float)
         
         # Type 1: Wishlist
         if self.wishlist_df is not None and not self.wishlist_df.empty:
@@ -101,18 +101,3 @@ class DataLoader:
             edge_index_t0.to(device), weights_t0.to(device),
             edge_index_t1.to(device), weights_t1.to(device)
         )
-
-    def make_submission(self, pred_fn: Callable, output_path: str):
-        """Standardized submission generator."""
-        sample_path = os.path.join(self.data_dir, "sample_submission.csv")
-        sub_df = pd.read_csv(sample_path)
-        
-        # Extract IDs from the sample format
-        sid_pid = sub_df["sid_pid"].str.split("_", expand=True)
-        sids = sid_pid[0].astype(int).values
-        pids = sid_pid[1].astype(int).values
-
-        # Generate predictions
-        sub_df["rating"] = pred_fn(sids, pids)
-        sub_df.to_csv(output_path, index=False)
-        print(f"Submission saved to {output_path}")
